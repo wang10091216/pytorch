@@ -1017,6 +1017,7 @@ def main():
         'typing_extensions',
         'sympy',
         'networkx',
+        'optree>=0.6.0',
     ]
 
     extras_require = {
