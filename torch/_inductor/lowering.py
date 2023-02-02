@@ -39,6 +39,7 @@ from .ir import (
 )
 from .utils import ceildiv, has_torchvision_roi_align, sympy_product
 from .virtualized import ops, V
+import torch.ao.quantization.fx._decomposed
 
 log = logging.getLogger(__name__)
 lowerings = {}
