@@ -63,6 +63,9 @@ class LocalSource(Source):
 class LocalInputSource(LocalSource):
     pos: int
 
+    def __hash__(self):
+        return hash((self.local_name, self.pos))
+
 
 @dataclasses.dataclass
 class RandomValueSource(Source):
@@ -270,6 +273,8 @@ class GetItemSource(Source):
             else:
                 return f"{self.base.name()}[{self.index!r}]"
 
+    def __hash__(self):
+        return hash((self.base, self.index))
 
 @dataclasses.dataclass
 class TupleIteratorGetItemSource(GetItemSource):

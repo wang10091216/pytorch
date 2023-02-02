@@ -160,7 +160,11 @@ class MetaConverter:
     # as part of this process, we will maintain this invariant!  (Even though
     # other users of this may not need it this property to be upheld.)
     def meta_tensor(
-        self, t, shape_env=None, callback=lambda t: t(), source: Optional[Source] = None
+        self,
+        t,
+        shape_env=None,
+        callback=lambda t: t(),
+        source: Optional[Source] = None,
     ):
         if source is None:
             from torch._dynamo.source import ConstantSource
@@ -500,7 +504,10 @@ class MetaConverter:
                     ctx = torch._C.DisableTorchFunctionSubclass()
                 with ctx:
                     r = self.meta_tensor(
-                        t, shape_env=shape_env, callback=callback, source=source
+                        t,
+                        shape_env=shape_env,
+                        callback=callback,
+                        source=source,
                     )
                 # TODO: this is suspicious, now that we have callback argument
                 if type(t) is torch.nn.Parameter:
