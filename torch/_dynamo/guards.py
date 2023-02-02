@@ -118,6 +118,9 @@ class GuardBuilder(GuardBuilderBase):
         # shape env guards get run after tensor match guards (since the
         # tensor match guards make sure we actually have tensors)
         self.shape_env_code: List[str] = []
+        # shape_env_preface holds a sequence of variable definitions.
+        # Those are the results of the common sub-expression elimination pass.
+        self.shape_env_preface: List[str] = []
 
         # Most of the time, we generate Python code in a guard to directly
         # check various properties.  However, tensors are a bit special;
@@ -409,7 +412,7 @@ class GuardBuilder(GuardBuilderBase):
         )
         if code != "True":
             self.shape_env_fn = code.fn
-            self._produce_guard_code(guard, [code.call_expr], shape_env=True)
+            self._produce_guard_code(guard, [code.call_expr], shape_env=True, preface=code.preface)
 
     def TENSOR_MATCH(self, guard: Guard):
         if guard.is_nn_module():
@@ -438,7 +441,7 @@ class GuardBuilder(GuardBuilderBase):
 
     # A util that appends guarded code, or, in the case of export, adds data onto guards
     def _produce_guard_code(
-        self, guard, code_list, provided_guarded_object=None, shape_env=False
+        self, guard, code_list, provided_guarded_object=None, shape_env=False, preface=[]
     ):
         # WARNING: It is important that cur_frame/caller do NOT stay in
         # the current frame, because they will keep things live longer
@@ -457,6 +460,7 @@ class GuardBuilder(GuardBuilderBase):
 
         if shape_env:
             self.shape_env_code.extend(code_list)
+            self.shape_env_preface.extend(preface)
         else:
             self.code.extend(code_list)
 
@@ -633,6 +637,7 @@ class CheckFunctionManager:
         def direct_negation(a, b):
             return not direct_equality(a, b)
 
+        preface = "\n".join((" " * 8) + line for line in local_builder.shape_env_preface)
         code = " and ".join(unique(code_parts))
         closure_vars = collections.OrderedDict(
             [
@@ -652,7 +657,10 @@ class CheckFunctionManager:
         closure_vars.update(CLOSURE_VARS)
         py_code = f"""\
 def ___make_guard_fn({','.join(closure_vars.keys())}):
-    return lambda {args}: {code}
+    def guard({args}):
+{preface}
+        return {code}
+    return guard
 """
         if os.environ.get("TORCHDYNAMO_PRINT_GUARDS", None) == "1":
             print("GUARDS", code)
