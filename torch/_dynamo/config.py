@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 from os.path import abspath, dirname
 
 import torch
@@ -181,7 +182,7 @@ allow_rnn = False
 # root folder of the project
 base_dir = dirname(dirname(dirname(abspath(__file__))))
 
-debug_dir_root = os.path.join(os.getcwd(), "torch_compile_debug")
+debug_dir_root = os.path.join(tempfile.gettempdir(), "torch_compile_debug")
 
 # this is to resolve a import problem in fbcode, we will be deleting
 # this very shortly
