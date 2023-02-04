@@ -2285,7 +2285,7 @@ def var(
     unbiased: Optional[bool] = None,
     keepdim: bool = False,
     *,
-    correction: Optional[int] = None,
+    correction: Optional[NumberType] = None,
 ) -> TensorLikeType:
     dim, unbiased = _dim_var_dispatch(dim, unbiased)
     correction = utils.set_correction(unbiased, correction)
@@ -2314,7 +2314,7 @@ def std(
     unbiased: Optional[bool] = None,
     keepdim: bool = False,
     *,
-    correction: Optional[int] = None,
+    correction: Optional[NumberType] = None,
 ) -> TensorLikeType:
     dim, unbiased = _dim_var_dispatch(dim, unbiased)
     correction = utils.set_correction(unbiased, correction)
