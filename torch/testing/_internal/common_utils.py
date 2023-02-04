@@ -746,7 +746,10 @@ def run_tests(argv=UNITTEST_ARGS):
         import pytest
         os.environ["NO_COLOR"] = "1"
         os.environ["USING_PYTEST"] = "1"
-        exit_code = pytest.main(args=argv + [f'--junit-xml-reruns={test_report_path}'] if TEST_SAVE_XML else [])
+        extra_args = ["--use-main-module"]
+        if TEST_SAVE_XML:
+            extra_args.append(f"--junit-xml-reruns={test_report_path}")
+        exit_code = pytest.main(args=argv + extra_args)
         del os.environ["USING_PYTEST"]
         if TEST_SAVE_XML:
             sanitize_pytest_xml(test_report_path)
