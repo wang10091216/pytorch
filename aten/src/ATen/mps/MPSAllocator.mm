@@ -179,6 +179,16 @@ bool MPSHeapAllocatorImpl::get_free_buffer(AllocParams& params)
   return true;
 }
 
+bool trigger_callbacks () {
+  for (const auto& name : MPSAllocatorCallbacksRegistry()->Keys()) {
+    MPSAllocatorCallbacksRegistry()->Create(name)->executeMPSAllocatorCallback(
+      nullptr,
+      IMpsAllocatorCallback::EventType::RELEASED
+    );
+  }
+  return true;
+};
+
 BufferBlock* MPSHeapAllocatorImpl::alloc_buffer_block(size_t size, uint32_t usage)
 {
   TORCH_CHECK(size < m_max_buffer_size, "Invalid buffer size: ", format_size(size));
@@ -202,6 +212,9 @@ BufferBlock* MPSHeapAllocatorImpl::alloc_buffer_block(size_t size, uint32_t usag
     block_found =
         // Attempt allocate
         alloc_buffer(params) ||
+        // Callbacks might release more memory (eg. by forcing a GC in the host language) thus
+        // we can retry getting a free buffer in the pool, before trying to alloc again.
+        (trigger_callbacks() && get_free_buffer(params)) ||
         // Free enough available cached blocks to satisfy alloc and retry alloc.
         (release_available_cached_buffers(params) && alloc_buffer(params)) ||
         // Free all cached buffers and retry alloc.
@@ -300,7 +313,7 @@ bool MPSHeapAllocatorImpl::release_buffer(BufferBlock* buffer_block, bool remove
       pool.heaps_pending_update.insert(heap_block);
       m_mutex.unlock();
       m_stream->addCompletedHandler(^(id <MTLCommandBuffer>) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         // check if the heap block still exists
         if (pool.heaps_pending_update.find(heap_block) != pool.heaps_pending_update.end()) {
           pool.heaps_pending_update.erase(heap_block);
@@ -440,7 +453,7 @@ void MPSHeapAllocatorImpl::garbage_collect_cached_buffers(AllocParams& params)
 // public interface to MPSAllocator
 id<MTLBuffer> MPSHeapAllocatorImpl::malloc(size_t size, uint32_t usage)
 {
-  std::lock_guard<std::mutex> lock(m_mutex);
+  std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
   BufferBlock* buffer_block = alloc_buffer_block(size, usage);
   return buffer_block ? buffer_block->buffer : nullptr;
@@ -448,7 +461,7 @@ id<MTLBuffer> MPSHeapAllocatorImpl::malloc(size_t size, uint32_t usage)
 
 bool MPSHeapAllocatorImpl::isSharedBuffer(void* ptr)
 {
-  std::lock_guard<std::mutex> lock(m_mutex);
+  std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
   BufferBlock *buffer_block = get_allocated_buffer_block(ptr);
   // it's OK for the buffer_block to not exist yet
@@ -459,7 +472,7 @@ id<MTLBuffer> MPSHeapAllocatorImpl::allocScalarBufferWithValue(void* value, size
 {
   BufferBlock* buffer_block = nullptr;
   {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     buffer_block = alloc_buffer_block(size, UsageFlags::SCALAR);
     if (!buffer_block)
@@ -472,7 +485,7 @@ id<MTLBuffer> MPSHeapAllocatorImpl::allocScalarBufferWithValue(void* value, size
 
 ssize_t MPSHeapAllocatorImpl::getRequestedBufferSize(void* ptr)
 {
-  std::lock_guard<std::mutex> lock(m_mutex);
+  std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
   BufferBlock *buffer_block = get_allocated_buffer_block(ptr);
   if (buffer_block)
@@ -483,7 +496,7 @@ ssize_t MPSHeapAllocatorImpl::getRequestedBufferSize(void* ptr)
 
 void MPSHeapAllocatorImpl::setBufferShape(void* ptr, const IntArrayRef& shape)
 {
-  std::lock_guard<std::mutex> lock(m_mutex);
+  std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
   BufferBlock *buffer_block = get_allocated_buffer_block(ptr);
   TORCH_INTERNAL_ASSERT(buffer_block, "failed to find the buffer ", ptr);
@@ -495,7 +508,7 @@ void MPSHeapAllocatorImpl::setBufferShape(void* ptr, const IntArrayRef& shape)
 
 IntArrayRef MPSHeapAllocatorImpl::getBufferShape(void* ptr)
 {
-  std::lock_guard<std::mutex> lock(m_mutex);
+  std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
   BufferBlock *buffer_block = get_allocated_buffer_block(ptr);
   if (buffer_block && buffer_block->shape.size() > 0)
@@ -508,7 +521,7 @@ void MPSHeapAllocatorImpl::free(void* ptr)
 {
   BufferBlock *buffer_block = nullptr;
   {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     buffer_block = get_allocated_buffer_block(ptr);
     TORCH_INTERNAL_ASSERT(buffer_block);
@@ -521,14 +534,14 @@ void MPSHeapAllocatorImpl::free(void* ptr)
   // we sync the scalar pool manually with completion handler at the time buffer is
   // freed when the MPSScalar instance goes our of scope
   m_stream->addCompletedHandler(^(id <MTLCommandBuffer>) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     free_buffer(buffer_block);
   });
 }
 
 void MPSHeapAllocatorImpl::emptyCache()
 {
-  std::lock_guard<std::mutex> lock(m_mutex);
+  std::lock_guard<std::recursive_mutex> lock(m_mutex);
   release_cached_buffers();
 }
 
