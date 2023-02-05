@@ -4,6 +4,7 @@ from typing import Callable, Any, Dict, Tuple, Optional, Sequence, List, Set
 from torch.utils.hooks import RemovableHandle
 from torch.utils._python_dispatch import TorchDispatchMode
 from collections import defaultdict
+from .function import Function
 import weakref
 import abc
 
@@ -260,6 +261,256 @@ class save_on_cpu(saved_tensors_hooks):
             return tensor.to(device, non_blocking=pin_memory)
 
         super().__init__(pack_to_cpu, unpack_from_cpu)
+
+# NOTE: [Checkpoint that supports nesting]
+#
+# Contents:
+# - Semantics
+# - Mechanism (TODO)
+#
+# Checkpointing Semantics
+# =======================
+#
+# We define checkpoint as a context manager such that any variables that
+# were saved by forward under this context AND remain saved at the point
+# in time when we exit the context are cleared and marked as needed during
+# recomputation.
+#
+# In other words, if saved tensors are manually cleared, e.g. by running
+# backward, checkpoint will ignore those tensors because it only cares about
+# the set of tensors saved at the point in time when the context exits.
+#
+# with checkpoint():
+#    y = x.sin()                # saves x
+#    z = y.exp()                # saves z
+#    torch.autograd.grad(z, z)  # clears z, only x remains saved
+#                               # As we exit, clears x only
+#
+# Special handling of input for the nested case
+# ---------------------------------------------
+#
+# There is some specially handling for the nested case: the inputs to
+# are treated as saved variables in the parent context.
+#
+# with checkpoint0():
+#   with checkpoint1():          # saves `y` in check0
+#     y = f(x)                   # f's saved variables are cleared by check1
+#   with checkpoint2():          # saves `z` in check0
+#     z = g(y)                   # g's saved variables are cleared by check1
+#                                # exiting check0, clears `y` and `z`
+#                                # whatever f and g save are hidden#
+#
+# (end of the note so far)
+
+# To be done before landing:
+# - Test memory usage on CUDA and try to achieve potential the theoretical O(log(n))
+#   memory usage reduction
+# - Save and restore rng, autocast state
+# - Maybe support non-Tensor inputs *args, **kwargs, should just be an API issue.
+# - Finish writing the docs here
+
+# Future work:
+# - Is this compatible with early stopping? The number of saved no longer increases monotonically
+#   so need of need a list of indices instead of just a counter. This seems OK
+# - Does functorch work using detach now?
+# - Handling of free variables (TBD)
+
+class NoopSaveInputs(Function):
+    # autograd Function that saves inputs and returns them as-is
+    # TODO: We need to wrap this to emulate the requires_gradness of the inputs
+    @staticmethod
+    def forward(*args):
+        return args
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: Tuple[Any, ...], output: Any) -> None:
+        ctx.save_for_backward(*inputs)
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        return grad_outputs
+
+class CheckpointFrame():
+    def __init__(self, parent: Optional["CheckpointFrame"], fn):
+        # Why do we need to store parent weakly?
+        self.parent: Optional[weakref.ref[CheckpointFrame]] = \
+            weakref.ref(parent) if parent is not None else parent
+
+        # Stores a wrapped function, where the proper contexts are captured
+        self.fn = fn
+        self.exited = False
+
+        # Increment a counter during packso we can identify the tensor during unpack
+        # There's a 1-to-1 correspondence between counter and len of weak_handles
+        self.counter = 0
+        self.weak_handles: List[Any] = []
+        # During pack, we save tensors temporarily to this field they are cleared upon
+        # exiting the checkpoint context.
+        self.saved_tensors: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+        # During recomputation, This is where tensors are saved to
+        self.recomputed: Dict[int, torch.Tensor] = dict()
+
+        # Flag to set when we've finished recomputing for a checkpoint frame,
+        # recomputation should only happen once.
+        self.is_recomputed = False
+
+        # Checkpoint frames need to store the inputs in order to recompute
+        # The simplest case is where there is no nesting, and we store args directly
+        # on the checkpoint frame.
+        #
+        # (1) Non-nested case
+        self.maybe_args: Optional[List[torch.Tensor]] = None
+
+        # (2) Nested case
+        #
+        # In the nested case however, we need to let the parent manage what we save
+        # and this includes the inputs of the child checkpoints.
+        #
+        # To try to reuse the logic of the parent checkpoint to handle these, we rely on
+        # a dummy autograd Function to pretend that inputs are also saved variables.
+        # However, inputs differ from normal saved tensors in at least the following ways:
+        #
+        # - We cannot rely on packed idx or handle to identify them, since we don't unpack
+        #   before using inputs, we need to have access to inputs as soon as any of the
+        #   saved variables in that context.
+        # - We don't want or need to detach them.
+        #
+        # Therefore, we need a couple extra fields so to distinguish them later:
+        self.args_idx: Optional[List[int]] = None
+        # During receomputation, check this list to know which ones to not detach
+        # (we'd like to avoid detaching inputs)
+        self.child_args_idx : List[int] = []
+        # In the case where the parent has not exited, tensors have not been cleared from
+        # frame.saved_tensors[handle], and frame.recomputed[idx] would still be empty
+        self.args_handles: Optional[List[Any]] = None
+
+    def __repr__(self):
+        return f"Frame(exit={int(self.exited)}, nest={int(self.is_nested())}, is_recomp={int(self.is_recomputed)})"
+
+    def is_nested(self):
+        return self.parent is not None
+
+    def get_args_from_parent(self):
+        assert self.parent is not None
+        parent_frame: Optional[CheckpointFrame] = self.parent()
+        assert parent_frame is not None
+        if parent_frame.exited:
+            assert self.args_idx is not None
+            return [parent_frame.recomputed[idx] for idx in self.args_idx]
+        else:
+            assert self.args_handles is not None
+            return [parent_frame.saved_tensors[handle()] for handle in self.args_handles]
+
+    def save_args_to_parent(self, args):
+        assert self.parent is not None
+        parent_frame: Optional[CheckpointFrame] = self.parent()
+        assert parent_frame is not None
+        parent_pre_counter = parent_frame.counter
+        new_args = NoopSaveInputs.apply(*args)  # TODO: fix require grad-ness
+        indices = list(range(parent_pre_counter, parent_frame.counter))
+        parent_frame.child_args_idx.extend(indices)
+        self.args_idx = indices
+        self.args_handles = parent_frame.weak_handles[parent_pre_counter: parent_frame.counter]
+        return new_args
+
+checkpoint_stacks: List[List[CheckpointFrame]] = []
+
+class _checkpoint_hook(saved_tensors_hooks):
+    def __init__(self):
+        def pack_hook(x):
+            # Snapshot the state of the current checkpoint stack
+            handle = _Handle()
+            current_frames = tuple(checkpoint_stacks[-1])
+            top_frame = current_frames[-1]
+            # We don't detach here, but we clear saved_tensors upon exiting checkpoint
+            top_frame.saved_tensors[handle] = x
+            idx = top_frame.counter
+            top_frame.counter += 1
+            top_frame.weak_handles.append(weakref.ref(handle))
+            assert len(top_frame.weak_handles) == top_frame.counter
+            return idx, handle, current_frames
+
+        def unpack_hook(saved):
+            idx, handle, frames = saved
+            top_frame = frames[-1]
+
+            if not top_frame.exited:
+                # Backward is called inside checkpoint
+                return top_frame.saved_tensors[handle]
+
+            if not top_frame.is_recomputed:
+                # Loop through the nested checkpoints
+                for i, frame in enumerate(frames):
+                    if frame.exited is False or frame.is_recomputed:
+                        continue
+                    # See NOTE [Nested Checkpoint Input Handling]
+                    if frame.is_nested():
+                        args = frame.get_args_from_parent()
+                    else:
+                        assert frame.maybe_args is not None
+                        args = frame.maybe_args
+
+                    with torch.autograd.enable_grad():
+                        do_recomputation(frame.fn, frame, *args)
+            return top_frame.recomputed[idx]
+
+        super().__init__(pack_hook, unpack_hook)
+
+def get_wrapped_fn(fn):
+    # Capture the current context, so we can replay it
+    def wrapped(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapped
+
+def do_recomputation(fn, target_frame: CheckpointFrame, *args):
+    checkpoint_stacks.append([CheckpointFrame(parent=None, fn=None)])
+    curr_frame = checkpoint_stacks[-1][0]
+    with _checkpoint_hook():
+        _ = fn(*args)  # TODO: why do we need the assign the return?!
+
+    for (idx, weak_handle) in enumerate(curr_frame.weak_handles):
+        if weak_handle() is None:
+            # We may have saved this variable at once point, but it was cleared possibly
+            # because the user called backward inside checkpoint.
+            continue
+        t = curr_frame.saved_tensors[weak_handle()]
+        target_frame.recomputed[idx] = t if idx in target_frame.child_args_idx else t.detach()
+
+    target_frame.is_recomputed = True
+    curr_frame.saved_tensors.clear()
+    curr_frame.exited = True
+    checkpoint_stacks.pop()
+
+def _checkpoint(fn, *args, **kwargs):
+    is_first_stack = len(checkpoint_stacks) == 0
+    if is_first_stack:
+        checkpoint_stacks.append([])
+    curr_stack = checkpoint_stacks[-1]
+    is_nested = len(curr_stack) > 0
+    curr_frame = CheckpointFrame(parent=curr_stack[-1] if is_nested else None, fn=get_wrapped_fn(fn))
+
+    # See NOTE [Nested Checkpoint Input Handling]
+    if is_nested:
+        # _checkpoint_hook from the parent frame is still active. Run autograd Function BEFORE
+        # pushing new frame to global stack so that packs still see its parent frame as the top frame
+        args = curr_frame.save_args_to_parent(args)
+    else:
+        # directly save inputs onto the current frame
+        curr_frame.maybe_args = args  # type: ignore[assignment]
+
+    curr_stack.append(curr_frame)
+
+    with _checkpoint_hook():
+        ret = fn(*args, **kwargs)
+
+    curr_frame.saved_tensors.clear()
+    curr_frame.exited = True
+    curr_stack.pop()
+
+    if is_first_stack:
+        checkpoint_stacks.pop()
+    return ret
 
 
 @contextlib.contextmanager
