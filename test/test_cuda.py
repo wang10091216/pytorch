@@ -59,7 +59,8 @@ if TEST_CUDA:
     TEST_LARGE_TENSOR = torch.cuda.get_device_properties(0).total_memory >= 12e9
     TEST_MEDIUM_TENSOR = torch.cuda.get_device_properties(0).total_memory >= 6e9
     TEST_BF16 = torch.cuda.is_bf16_supported()
-    TEST_GRAPH = (torch.version.cuda and int(torch.version.cuda.split(".")[0]) >= 11) or (torch.version.hip and float(".".join(torch.version.hip.split(".")[0:2])) >= 5.3)
+    TEST_GRAPH = (torch.version.cuda and int(torch.version.cuda.split(".")[0]) >= 11) or
+    (torch.version.hip and float(".".join(torch.version.hip.split(".")[0:2])) >= 5.3)
 
 
 def make_sparse_tensor(t, n, *sizes):
@@ -3726,12 +3727,12 @@ exit(2)
             torch.cuda.empty_cache()
 
     @unittest.skipIf((not TEST_GRAPH) or
-                      IS_WINDOWS or  # appears to still be broken on Windows as of 11.4+
-                      (torch.version.cuda and 
-                       int(torch.version.cuda.split(".")[0]) == 11 and
-                       int(torch.version.cuda.split(".")[1]) < 4),
-                      "Graph bindings disallow concurrent replay for CUDA < 11.4, see " +
-                      "https://github.com/pytorch/pytorch/pull/57556")
+                     IS_WINDOWS or  # appears to still be broken on Windows as of 11.4+
+                     (torch.version.cuda and
+                     int(torch.version.cuda.split(".")[0]) == 11 and
+                     int(torch.version.cuda.split(".")[1]) < 4),
+                     "Graph bindings disallow concurrent replay for CUDA < 11.4, see " +
+                     "https://github.com/pytorch/pytorch/pull/57556")
     @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
     def test_graph_concurrent_replay(self):
         torch.cuda.empty_cache()
@@ -4088,8 +4089,8 @@ exit(2)
     @parametrize(
         "with_amp,cache_enabled,allow_unused_input",
         [
-            subtest((False, False, True),decorators=[skipIfRocm]),
-            subtest((True, False, True),decorators=[skipIfRocm]),
+            subtest((False, False, True), decorators=[skipIfRocm]),
+            subtest((True, False, True), decorators=[skipIfRocm]),
             subtest((True, True, True), decorators=[unittest.expectedFailure]),
             subtest((False, False, False), decorators=[unittest.expectedFailure]),
         ],
