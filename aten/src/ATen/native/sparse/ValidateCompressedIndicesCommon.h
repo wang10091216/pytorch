@@ -374,7 +374,9 @@ void validate_compressed_sparse_indices_kernel(
     const int64_t cdim,
     const int64_t dim,
     const int64_t nnz) {
-  constexpr int64_t idx_max_ndims = 16;
+  // Test both paths, static vs dynamic.
+  // TODO: remove once CIs are green.
+  constexpr int64_t idx_max_ndims = 1;
   const int64_t idx_ndims = idx.dim();
 
   if (is_crow) {
