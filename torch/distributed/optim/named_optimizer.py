@@ -191,9 +191,14 @@ class _NamedOptimizer(optim.Optimizer):
             )
 
         for idx, param_key in enumerate(self.ordered_param_keys):
-            # When the conditional training is performed, not all parameters are updated in the optim.
+            # All states must exist in the provided ``state_dict``. Even if a
+            # parameter is not used (size is empty or not used in the model),
+            # the initial state should exist in the ``state_dict`` to satisfy
+            # the assumption of NamedOptimizer.
             if param_key not in state.keys():
-                continue
+                raise ValueError(
+                    f"Could not found {param_key} parameter in the state_dict."
+                )
             if len(state[param_key]) != len(new_state[idx]):
                 raise ValueError(
                     f"Expects equal length as {len(new_state[idx])} for parameter {param_key} but found: {len(state[param_key])}"
