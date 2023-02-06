@@ -426,6 +426,9 @@ class TestInductorOpInfo(TestCase):
     check_model = check_model
     check_model_cuda = check_model_cuda
 
+    def setUp(self):
+        print("In method", self._testMethodName, flush=True)
+
     @onlyNativeDeviceTypes
     @suppress_warnings
     @skipCUDAMemoryLeakCheckIf(
