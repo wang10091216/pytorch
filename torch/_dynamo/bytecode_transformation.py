@@ -18,7 +18,7 @@ class Instruction:
 
     opcode: int
     opname: str
-    arg: int
+    arg: Optional[int]
     argval: Any
     offset: Optional[int] = None
     starts_line: Optional[int] = None
@@ -55,6 +55,12 @@ def create_instruction(name, arg=None, argval=_NotProvided, target=None):
     return Instruction(
         opcode=dis.opmap[name], opname=name, arg=arg, argval=argval, target=target
     )
+
+
+# Python 3.11 remaps
+def create_jump_absolute(target):
+    inst = "JUMP_FORWARD" if sys.version_info >= (3, 11) else "JUMP_ABSOLUTE"
+    return create_instruction(inst, target=target)
 
 
 def lnotab_writer(lineno, byteno=0):
@@ -178,9 +184,26 @@ def devirtualize_jumps(instructions):
                 if sys.version_info < (3, 10):
                     inst.arg = target.offset - inst.offset - instruction_size(inst)
                 else:
-                    inst.arg = int(
-                        (target.offset - inst.offset - instruction_size(inst)) / 2
-                    )
+                    inst.arg = int(target.offset - inst.offset - instruction_size(inst))
+                    if inst.arg < 0:
+                        if sys.version_info < (3, 11):
+                            raise RuntimeError(
+                                "Got negative jump offset for Python < 3.11"
+                            )
+                        inst.arg = -inst.arg
+                        # forward jumps become backward
+                        if "FORWARD" in inst.opname:
+                            inst.opname = inst.opname.replace("FORWARD", "BACKWARD")
+                            inst.opcode = dis.opmap[inst.opname]
+                            assert inst.opcode in jumps
+                    else:
+                        # backward jumps become forward
+                        if sys.version_info >= (3, 11) and "BACKWARD" in inst.opname:
+                            inst.opname = inst.opname.replace("BACKWARD", "FORWARD")
+                            inst.opcode = dis.opmap[inst.opname]
+                            assert inst.opcode in jumps
+                    inst.arg //= 2
+                    assert inst.arg > 0
             inst.argval = target.offset
             inst.argrepr = f"to {target.offset}"
 
@@ -375,7 +398,10 @@ def transform_code_object(code, transformations, safe=False):
     propagate_line_nums(instructions)
 
     transformations(instructions, code_options)
+    return clean_and_assemble_instructions(instructions, keys, code_options)[1]
 
+
+def clean_and_assemble_instructions(instructions, keys, code_options):
     fix_vars(instructions, code_options)
 
     dirty = True
@@ -401,7 +427,7 @@ def transform_code_object(code, transformations, safe=False):
     if sys.version_info >= (3, 11):
         # generated code doesn't contain exceptions, so leave exception table empty
         code_options["co_exceptiontable"] = b""
-    return types.CodeType(*[code_options[k] for k in keys])
+    return instructions, types.CodeType(*[code_options[k] for k in keys])
 
 
 def cleaned_instructions(code, safe=False):
