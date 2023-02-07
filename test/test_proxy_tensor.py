@@ -928,6 +928,20 @@ def forward(self, a_1):
     mul = torch.ops.aten.mul.Tensor(a_1, _local_scalar_dense);  a_1 = _local_scalar_dense = None
     return mul""")
 
+    def test_item_to_constructor(self):
+        def f(a):
+            r = a.item()
+            r.node.shape_env.expr_subs[r.node.expr].append(((r >= 0).node.expr, True))
+            r.node.shape_env.expr_subs[r.node.expr].append(((r == 0).node.expr, False))
+            r.node.shape_env.expr_subs[r.node.expr].append(((r == -1).node.expr, False))
+            return torch.empty(r)
+
+        r = str(make_fx(f, tracing_mode="symbolic")(torch.randint(5, (1,))).code).strip()
+        self.assertExpectedInline(r, """\
+def forward(self, a_1):
+    _local_scalar_dense = torch.ops.aten._local_scalar_dense.default(a_1);  a_1 = None
+    empty = torch.ops.aten.empty.memory_format([_local_scalar_dense], device = device(type='cpu'), pin_memory = False);  _local_scalar_dense = None
+    return empty""")
 
     def test_neg_shape(self):
         def f(a):
@@ -988,7 +1002,8 @@ def forward(self, a_1):
         gm = self._test_dynamic(f, [(1, 6), (8, 1)], test_inputs)
         self.assertTrue(eval_guards(gm, torch.randn(1, 10), torch.randn(6, 1)))
         self.assertFalse(eval_guards(gm, torch.randn(1, 2), torch.randn(4, 1)))
-        assert len(gm.shape_env.guards) == 1
+        guards = "\n".join(gm.shape_env.produce_guards(fx_placeholder_vals(gm), ["a", "b"], simplified=True))
+        self.assertExpectedInline(guards, """2*a.size()[1]*b.size()[0] > 20""")
 
     def test_new_empty(self):
         def f(a, b):
